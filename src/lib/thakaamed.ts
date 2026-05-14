@@ -92,37 +92,22 @@ export async function pollThakaaMedAnalysis(
   assertValidSlug(slug);
   const apiKey = getRequiredEnv("THAKAAMED_API_KEY");
   const facilityCode = getRequiredEnv("THAKAAMED_FACILITY_CODE");
-  const base = normalizeBaseUrl(language);
-  const candidates = [new URL(`${slug}/`, base), new URL(base)];
+  const requestUrl = new URL(normalizeBaseUrl(language));
+  requestUrl.searchParams.set("slug", slug);
+  requestUrl.searchParams.set("api_key", apiKey);
+  requestUrl.searchParams.set("facility_code", facilityCode);
 
-  candidates[1].searchParams.set("slug", slug);
+  const response = await fetch(requestUrl, {
+    method: "GET",
+    cache: "no-store",
+  });
+  const payload = (await parseJsonResponse(response)) as ThakaaMedAnalysisResponse;
 
-  let lastError: Error | null = null;
-
-  for (const candidate of candidates) {
-    candidate.searchParams.set("api_key", apiKey);
-    candidate.searchParams.set("facility_code", facilityCode);
-
-    try {
-      const response = await fetch(candidate, {
-        method: "GET",
-        cache: "no-store",
-      });
-      const payload = (await parseJsonResponse(response)) as ThakaaMedAnalysisResponse;
-
-      if (!response.ok) {
-        throw new Error(payload.error_message || payload.message || `Polling failed (${response.status}).`);
-      }
-
-      if (payload && typeof payload === "object" && "is_done" in payload) {
-        return payload;
-      }
-    } catch (error) {
-      lastError = error instanceof Error ? error : new Error("Polling failed.");
-    }
+  if (!response.ok) {
+    throw new Error(payload.error_message || payload.message || `Polling failed (${response.status}).`);
   }
 
-  throw lastError ?? new Error("Unable to poll ThakaaMed analysis.");
+  return payload;
 }
 
 function wait(delayMs: number) {
