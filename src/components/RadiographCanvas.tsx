@@ -23,17 +23,17 @@ import {
 
 import {
   getBaseTransform,
-  getLabelAnchor,
   getToothPrimaryColor,
   getZoomTransform,
   HIGHLIGHT_COLORS,
   polygonToKonvaPoints,
 } from "@/lib/canvasOps";
 import type { HighlightColor } from "@/types/script";
-import type { SpatialContext } from "@/types/thakaamed";
+import type { SpatialContext, ThakaaMedBoundingBox, ThakaaMedCoordinatePair } from "@/types/thakaamed";
 
 interface HighlightOverlay {
-  toothId: string;
+  id: string;
+  polygon: ThakaaMedCoordinatePair[];
   color: HighlightColor;
   opacity: number;
   label?: string;
@@ -47,6 +47,13 @@ export interface RadiographCanvasHandle {
     opacity?: number,
     label?: string,
   ) => Promise<void>;
+  highlightPolygon: (
+    id: string,
+    polygon: ThakaaMedCoordinatePair[],
+    color?: HighlightColor,
+    opacity?: number,
+    label?: string,
+  ) => Promise<void>;
   annotate: (toothId: string, label: string) => Promise<void>;
   resetView: () => Promise<void>;
 }
@@ -55,14 +62,35 @@ interface RadiographCanvasProps {
   imageSrc: string | null;
   spatialContext: SpatialContext | null;
   selectedToothId: string | null;
+  selectedAreaPolygon?: ThakaaMedCoordinatePair[] | null;
   onToothSelect: (toothId: string) => void;
+}
+
+const LABEL_VERTICAL_OFFSET = 18;
+const MANUAL_ZOOM_STEP = 1.18;
+const MIN_ZOOM_MULTIPLIER = 0.7;
+const MAX_ZOOM_MULTIPLIER = 6;
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function getPolygonBounds(polygon: ThakaaMedCoordinatePair[]): ThakaaMedBoundingBox {
+  const xs = polygon.map(([x]) => x);
+  const ys = polygon.map(([, y]) => y);
+  return {
+    xmin: Math.min(...xs),
+    ymin: Math.min(...ys),
+    xmax: Math.max(...xs),
+    ymax: Math.max(...ys),
+  };
 }
 
 export const RadiographCanvas = forwardRef<
   RadiographCanvasHandle,
   RadiographCanvasProps
 >(function RadiographCanvas(
-  { imageSrc, spatialContext, selectedToothId, onToothSelect },
+  { imageSrc, spatialContext, selectedToothId, selectedAreaPolygon = null, onToothSelect },
   ref,
 ) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -112,6 +140,14 @@ export const RadiographCanvas = forwardRef<
   const baseTransform = useMemo(
     () => getBaseTransform(stageWidth, imageSize.width),
     [imageSize.width, stageWidth],
+  );
+  const minScale = useMemo(
+    () => baseTransform.scale * MIN_ZOOM_MULTIPLIER,
+    [baseTransform.scale],
+  );
+  const maxScale = useMemo(
+    () => baseTransform.scale * MAX_ZOOM_MULTIPLIER,
+    [baseTransform.scale],
   );
 
   const applyTransformImmediately = useCallback((transform: { x: number; y: number; scale: number }) => {
@@ -169,6 +205,34 @@ export const RadiographCanvas = forwardRef<
     [applyTransformImmediately],
   );
 
+  const getScaledTransformAtPoint = useCallback(
+    (stagePoint: { x: number; y: number }, targetScale: number) => {
+      const current = transformRef.current;
+      const imagePointX = (stagePoint.x - current.x) / current.scale;
+      const imagePointY = (stagePoint.y - current.y) / current.scale;
+
+      return {
+        scale: targetScale,
+        x: stagePoint.x - imagePointX * targetScale,
+        y: stagePoint.y - imagePointY * targetScale,
+      };
+    },
+    [],
+  );
+
+  const zoomByStep = useCallback(
+    async (direction: "in" | "out") => {
+      const factor = direction === "in" ? MANUAL_ZOOM_STEP : 1 / MANUAL_ZOOM_STEP;
+      const nextScale = clamp(transformRef.current.scale * factor, minScale, maxScale);
+      const nextTransform = getScaledTransformAtPoint(
+        { x: stageWidth / 2, y: stageHeight / 2 },
+        nextScale,
+      );
+      await animateTo(nextTransform, 280);
+    },
+    [animateTo, getScaledTransformAtPoint, maxScale, minScale, stageHeight, stageWidth],
+  );
+
   useImperativeHandle(
     ref,
     () => ({
@@ -196,11 +260,13 @@ export const RadiographCanvas = forwardRef<
         setActiveToothId(toothId);
         setOverlays((current) => {
           const nextColor = color ?? getToothPrimaryColor(tooth);
-          const filtered = current.filter((item) => item.toothId !== toothId);
+          const nextId = `tooth:${toothId}`;
+          const filtered = current.filter((item) => item.id !== nextId);
           return [
             ...filtered,
             {
-              toothId,
+              id: nextId,
+              polygon: tooth.polygon,
               color: nextColor,
               opacity,
               label,
@@ -210,10 +276,32 @@ export const RadiographCanvas = forwardRef<
 
         await new Promise((resolve) => window.setTimeout(resolve, 180));
       },
+      async highlightPolygon(id, polygon, color = "yellow", opacity = 0.3, label) {
+        if (!polygon.length) {
+          return;
+        }
+
+        const bbox = getPolygonBounds(polygon);
+        await animateTo(
+          getZoomTransform({
+            bbox,
+            stageWidth,
+            stageHeight,
+            maxZoom: 2.2,
+          }),
+          550,
+        );
+
+        setOverlays((current) => {
+          const nextId = `area:${id}`;
+          const filtered = current.filter((item) => item.id !== nextId);
+          return [...filtered, { id: nextId, polygon, color, opacity, label }];
+        });
+      },
       async annotate(toothId, label) {
         setOverlays((current) =>
           current.map((item) =>
-            item.toothId === toothId ? { ...item, label } : item,
+            item.id === `tooth:${toothId}` ? { ...item, label } : item,
           ),
         );
       },
@@ -238,16 +326,60 @@ export const RadiographCanvas = forwardRef<
           <p className="text-sm font-semibold uppercase tracking-[0.32em] text-cyan-200">
             Radiograph canvas
           </p>
-          <h2 className="mt-2 text-xl font-semibold text-white">Zoom + highlight in sync with the mentor</h2>
+          <h2 className="mt-2 text-xl font-semibold text-white">Interactive clinical canvas</h2>
         </div>
-        <div className="rounded-full border border-white/10 px-3 py-1 text-xs font-medium text-slate-300">
-          {spatialContext?.imageType ?? "Waiting for image"}
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              void zoomByStep("out");
+            }}
+            disabled={!imageElement}
+            className="rounded-full border border-white/10 px-3 py-1 text-xs font-semibold text-slate-200 transition hover:border-cyan-300 disabled:cursor-not-allowed disabled:border-slate-700 disabled:text-slate-500"
+            aria-label="Zoom out"
+          >
+            −
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              void zoomByStep("in");
+            }}
+            disabled={!imageElement}
+            className="rounded-full border border-white/10 px-3 py-1 text-xs font-semibold text-slate-200 transition hover:border-cyan-300 disabled:cursor-not-allowed disabled:border-slate-700 disabled:text-slate-500"
+            aria-label="Zoom in"
+          >
+            +
+          </button>
+          <div className="rounded-full border border-white/10 px-3 py-1 text-xs font-medium text-slate-300">
+            {spatialContext?.imageType ?? "Waiting for image"}
+          </div>
         </div>
       </div>
 
       <div ref={containerRef} className="overflow-hidden rounded-[28px] border border-white/10 bg-slate-950/90">
         {imageElement ? (
-          <Stage width={stageWidth} height={stageHeight}>
+          <Stage
+            width={stageWidth}
+            height={stageHeight}
+            onWheel={(event) => {
+              event.evt.preventDefault();
+              const stage = event.target.getStage();
+              if (!stage) {
+                return;
+              }
+
+              const pointer = stage.getPointerPosition();
+              if (!pointer) {
+                return;
+              }
+
+              const factor = event.evt.deltaY > 0 ? 1 / MANUAL_ZOOM_STEP : MANUAL_ZOOM_STEP;
+              const nextScale = clamp(transformRef.current.scale * factor, minScale, maxScale);
+              const nextTransform = getScaledTransformAtPoint(pointer, nextScale);
+              applyTransformImmediately(nextTransform);
+            }}
+          >
             <Layer>
               <Group ref={groupRef}>
                 <KonvaImage image={imageElement} width={imageSize.width} height={imageSize.height} />
@@ -255,6 +387,17 @@ export const RadiographCanvas = forwardRef<
                 {selectedTooth && (
                   <Line
                     points={polygonToKonvaPoints(selectedTooth.polygon)}
+                    closed
+                    stroke="#67e8f9"
+                    strokeWidth={5}
+                    opacity={0.7}
+                    listening={false}
+                  />
+                )}
+
+                {selectedAreaPolygon && (
+                  <Line
+                    points={polygonToKonvaPoints(selectedAreaPolygon)}
                     closed
                     stroke="#67e8f9"
                     strokeWidth={5}
@@ -278,16 +421,11 @@ export const RadiographCanvas = forwardRef<
                 ))}
 
                 {overlays.map((overlay) => {
-                  const tooth = spatialContext?.teeth[overlay.toothId];
-                  if (!tooth) {
-                    return null;
-                  }
-
-                  const anchor = getLabelAnchor(tooth.findings[0], tooth.bbox);
+                  const [x, y] = overlay.polygon[0] ?? [0, 0];
                   return (
-                    <Group key={overlay.toothId}>
+                    <Group key={overlay.id}>
                       <Line
-                        points={polygonToKonvaPoints(tooth.polygon)}
+                        points={polygonToKonvaPoints(overlay.polygon)}
                         closed
                         fill={HIGHLIGHT_COLORS[overlay.color]}
                         opacity={overlay.opacity}
@@ -296,7 +434,7 @@ export const RadiographCanvas = forwardRef<
                         listening={false}
                       />
                       {overlay.label && (
-                        <Label x={anchor.x} y={anchor.y} listening={false}>
+                        <Label x={x} y={y - LABEL_VERTICAL_OFFSET} listening={false}>
                           <Tag fill="rgba(15, 23, 42, 0.92)" cornerRadius={10} />
                           <Text
                             text={overlay.label}

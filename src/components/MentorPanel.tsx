@@ -42,9 +42,9 @@ export function MentorPanel({
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <p className="text-sm font-semibold uppercase tracking-[0.32em] text-cyan-200">
-            Mentor panel
+            Audio chatbot
           </p>
-          <h2 className="mt-2 text-xl font-semibold text-white">Narrated teaching session</h2>
+          <h2 className="mt-2 text-xl font-semibold text-white">Voice assistant + transcription</h2>
           <p className="mt-2 text-sm text-slate-300">{sessionLabel}</p>
         </div>
         <span className="rounded-full border border-white/10 px-3 py-1 text-xs font-medium text-slate-300">
@@ -118,12 +118,12 @@ export function MentorPanel({
       </div>
 
       <div className="mt-6 rounded-2xl border border-white/10 bg-slate-950/70 p-4">
-        <p className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-400">Current narration</p>
+        <p className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-400">Live transcription</p>
         <p
           dir={LANGUAGE_META[language].direction}
           className="mt-3 min-h-24 text-sm leading-7 text-slate-100"
         >
-          {currentLine || "Start the mentor session to hear the guided narration."}
+          {currentLine || "Start the audio chatbot session to view live transcription."}
         </p>
       </div>
     </section>
