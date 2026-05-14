@@ -10,17 +10,16 @@ import {
 } from "@/components/RadiographCanvas";
 import { UploadZone } from "@/components/UploadZone";
 import { getToothPrimaryColor, toneToHighlightColor } from "@/lib/canvasOps";
+import {
+  MAX_CONVERSATION_TURNS,
+  readConversationTurns,
+  type ConversationTurn,
+  writeConversationTurns,
+} from "@/lib/conversationStorage";
 import { DEMO_IMAGE_SRC, DEMO_SPATIAL_CONTEXT } from "@/lib/sampleData";
-import { getDemoScript } from "@/lib/sampleScript";
 import { buildSpatialContext } from "@/lib/spatialContext";
 import { analyzeWithCache } from "@/lib/thakaamed";
-import {
-  cancelSpeech,
-  pauseSpeech,
-  resumeSpeech,
-  speakText,
-  waitForVoices,
-} from "@/lib/scriptPlayer";
+import { cancelSpeech, speakText } from "@/lib/scriptPlayer";
 import { LANGUAGE_META, type MentorLanguage, type ScriptEvent } from "@/types/script";
 import type { SpatialContext, SpatialFinding, ThakaaMedAnalysisResponse } from "@/types/thakaamed";
 
@@ -28,38 +27,60 @@ function createAbortError() {
   return new DOMException("Playback aborted", "AbortError");
 }
 
+function appendTurns(current: ConversationTurn[], next: ConversationTurn[]) {
+  return [...current, ...next].slice(-MAX_CONVERSATION_TURNS);
+}
+
+function extensionFromMimeType(mimeType: string) {
+  if (mimeType.includes("ogg")) {
+    return "ogg";
+  }
+  if (mimeType.includes("mp4")) {
+    return "mp4";
+  }
+  if (mimeType.includes("mpeg")) {
+    return "mp3";
+  }
+  return "webm";
+}
+
+const ANIMATION_CHAR_DELAY_MS = 12;
+
 export default function DashboardPage() {
   const canvasRef = useRef<RadiographCanvasHandle | null>(null);
   const playbackAbortRef = useRef<AbortController | null>(null);
-  const pauseResolversRef = useRef<Array<() => void>>([]);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const mediaChunksRef = useRef<Blob[]>([]);
+  const currentAudioRef = useRef<HTMLAudioElement | null>(null);
+  const turnClockRef = useRef(0);
 
   const [analysis, setAnalysis] = useState<ThakaaMedAnalysisResponse | null>(null);
   const [spatialContext, setSpatialContext] = useState<SpatialContext | null>(null);
   const [imageSrc, setImageSrc] = useState<string | null>(null);
   const [sessionSource, setSessionSource] = useState<"none" | "demo" | "live">("none");
   const [language, setLanguage] = useState<MentorLanguage>("en");
-  const [speed, setSpeed] = useState(1);
-  const [script, setScript] = useState<ScriptEvent[]>([]);
-  const [scriptLanguage, setScriptLanguage] = useState<MentorLanguage | null>(null);
   const [selectedToothId, setSelectedToothId] = useState<string | null>(null);
   const [selectedAreaId, setSelectedAreaId] = useState<string | null>(null);
   const [currentLine, setCurrentLine] = useState("");
   const [statusMessage, setStatusMessage] = useState(
-    "Upload a radiograph or launch demo mode to start the teaching session.",
+    "Upload a radiograph or launch demo mode, then talk with the mentor using voice or text.",
   );
   const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [isGeneratingScript, setIsGeneratingScript] = useState(false);
-  const [voicesReady, setVoicesReady] = useState(false);
-  const [playbackState, setPlaybackState] = useState<
-    "idle" | "ready" | "playing" | "paused" | "completed"
-  >("idle");
+  const [isProcessingMessage, setIsProcessingMessage] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+  const [messageInput, setMessageInput] = useState("");
+  const [conversation, setConversation] = useState<ConversationTurn[]>(() => readConversationTurns());
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    void waitForVoices().then(() => setVoicesReady(true));
-  }, []);
+    writeConversationTurns(conversation);
+    const latestTurnAt = conversation[conversation.length - 1]?.at;
+    if (latestTurnAt) {
+      turnClockRef.current = Math.max(turnClockRef.current, latestTurnAt);
+    }
+  }, [conversation]);
 
-  const busy = isAnalyzing || isGeneratingScript;
+  const busy = isAnalyzing || isProcessingMessage;
 
   const areaLookup = useMemo(() => {
     if (!spatialContext) {
@@ -71,87 +92,46 @@ export default function DashboardPage() {
     );
   }, [spatialContext]);
 
-  const releasePauseWaiters = useCallback(() => {
-    pauseResolversRef.current.splice(0).forEach((resolve) => resolve());
-  }, []);
-
   const stopPlayback = useCallback(
-    async (nextState: "idle" | "ready" = "ready") => {
+    async (nextLine = "") => {
       playbackAbortRef.current?.abort();
       playbackAbortRef.current = null;
+      currentAudioRef.current?.pause();
+      currentAudioRef.current = null;
       cancelSpeech();
-      releasePauseWaiters();
-      setPlaybackState(nextState);
-      setCurrentLine("");
+      setCurrentLine(nextLine);
       await canvasRef.current?.resetView();
     },
-    [releasePauseWaiters],
+    [],
   );
 
   useEffect(() => {
     return () => {
-      void stopPlayback("idle");
+      void stopPlayback();
+      mediaRecorderRef.current?.stream.getTracks().forEach((track) => track.stop());
     };
   }, [stopPlayback]);
 
-  const waitIfPaused = useCallback(
-    async (signal: AbortSignal) => {
-      while (playbackState === "paused") {
-        await new Promise<void>((resolve, reject) => {
-          const onAbort = () => {
-            signal.removeEventListener("abort", onAbort);
-            reject(createAbortError());
-          };
-
-          pauseResolversRef.current.push(() => {
-            signal.removeEventListener("abort", onAbort);
-            resolve();
-          });
-
-          signal.addEventListener("abort", onAbort, { once: true });
-        });
-      }
-
-      if (signal.aborted) {
-        throw createAbortError();
-      }
-    },
-    [playbackState],
-  );
-
-  const handleLanguageChange = useCallback(
-    (nextLanguage: MentorLanguage) => {
-      setLanguage(nextLanguage);
-      setSelectedAreaId(null);
-      if (sessionSource === "demo") {
-        setScript(getDemoScript(nextLanguage));
-        setScriptLanguage(nextLanguage);
-      } else {
-        setScript([]);
-        setScriptLanguage(null);
-      }
-    },
-    [sessionSource],
-  );
+  const handleLanguageChange = useCallback((nextLanguage: MentorLanguage) => {
+    setLanguage(nextLanguage);
+    setSelectedAreaId(null);
+  }, []);
 
   const handleTryDemo = useCallback(async () => {
-    await stopPlayback("ready");
+    await stopPlayback();
     setSessionSource("demo");
     setAnalysis(null);
     setSpatialContext(DEMO_SPATIAL_CONTEXT);
     setImageSrc(DEMO_IMAGE_SRC);
     setSelectedToothId(DEMO_SPATIAL_CONTEXT.orderedTeeth[0]);
     setSelectedAreaId(null);
-    setScript(getDemoScript(language));
-    setScriptLanguage(language);
-    setStatusMessage("Offline demo loaded. No ThakaaMed or Claude requests were made.");
-    setPlaybackState("ready");
+    setStatusMessage("Offline demo loaded. Start a voice/text conversation with the mentor.");
     setError(null);
-  }, [language, stopPlayback]);
+  }, [stopPlayback]);
 
   const handleFileSelected = useCallback(
     async (file: File) => {
-      await stopPlayback("ready");
+      await stopPlayback();
       setIsAnalyzing(true);
       setError(null);
       setStatusMessage(`Submitting ${file.name} to ThakaaMed...`);
@@ -165,13 +145,10 @@ export default function DashboardPage() {
         setImageSrc(nextAnalysis.draw_image || nextAnalysis.original_image);
         setSelectedToothId(nextContext.orderedTeeth[0] ?? null);
         setSelectedAreaId(null);
-        setScript([]);
-        setScriptLanguage(null);
-        setPlaybackState("ready");
         setStatusMessage(
           fromCache
-            ? "Loaded cached analysis. Start the mentor when you are ready."
-            : "Analysis ready. Generate the mentor script to begin playback.",
+            ? "Loaded cached analysis. Start speaking or type to continue."
+            : "Analysis ready. Start speaking or type your first mentor message.",
         );
       } catch (uploadError) {
         const message =
@@ -186,45 +163,6 @@ export default function DashboardPage() {
     },
     [language, stopPlayback],
   );
-
-  const ensureScript = useCallback(async () => {
-    if (!spatialContext) {
-      throw new Error("No spatial context available.");
-    }
-
-    if (sessionSource === "demo") {
-      const demoScript = getDemoScript(language);
-      setScript(demoScript);
-      setScriptLanguage(language);
-      return demoScript;
-    }
-
-    if (script.length > 0 && scriptLanguage === language) {
-      return script;
-    }
-
-    setIsGeneratingScript(true);
-    setStatusMessage("Generating a Claude mentor script...");
-
-    try {
-      const response = await fetch("/api/mentor", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ spatialContext, language }),
-      });
-
-      const payload = (await response.json()) as { script?: ScriptEvent[]; error?: string };
-      if (!response.ok || !payload.script) {
-        throw new Error(payload.error ?? "Failed to generate the mentor script.");
-      }
-
-      setScript(payload.script);
-      setScriptLanguage(language);
-      return payload.script;
-    } finally {
-      setIsGeneratingScript(false);
-    }
-  }, [language, script, scriptLanguage, sessionSource, spatialContext]);
 
   const runCanvasEvent = useCallback(async (event: Extract<ScriptEvent, { type: "canvas" }>) => {
     const canvas = canvasRef.current;
@@ -266,101 +204,234 @@ export default function DashboardPage() {
     }
   }, []);
 
-  const runPlayback = useCallback(
-    async (nextScript: ScriptEvent[]) => {
-      if (!nextScript.length) {
-        throw new Error("The mentor script was empty.");
+  const animateLine = useCallback(async (text: string, signal: AbortSignal) => {
+    setCurrentLine("");
+    for (let index = 1; index <= text.length; index += 1) {
+      if (signal.aborted) {
+        throw createAbortError();
+      }
+      setCurrentLine(text.slice(0, index));
+      await new Promise((resolve) => window.setTimeout(resolve, ANIMATION_CHAR_DELAY_MS));
+    }
+  }, []);
+
+  const playBase64Audio = useCallback(async (base64: string, mimeType: string, signal: AbortSignal) => {
+    const source = `data:${mimeType};base64,${base64}`;
+    await new Promise<void>((resolve, reject) => {
+      const audio = new Audio(source);
+      currentAudioRef.current = audio;
+
+      const onAbort = () => {
+        audio.pause();
+        signal.removeEventListener("abort", onAbort);
+        reject(createAbortError());
+      };
+
+      signal.addEventListener("abort", onAbort, { once: true });
+      audio.onended = () => {
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      };
+      audio.onerror = () => {
+        signal.removeEventListener("abort", onAbort);
+        reject(new Error("Generated audio playback failed."));
+      };
+
+      void audio.play().catch(() => {
+        signal.removeEventListener("abort", onAbort);
+        reject(new Error("Audio autoplay blocked. Please interact with the page and retry."));
+      });
+    });
+  }, []);
+
+  const playScript = useCallback(
+    async (script: ScriptEvent[]) => {
+      if (!script.length) {
+        throw new Error("The mentor response was empty.");
       }
 
-      await stopPlayback("ready");
+      await stopPlayback();
       const controller = new AbortController();
       playbackAbortRef.current = controller;
-      setPlaybackState("playing");
       setError(null);
-      setStatusMessage("Mentor session in progress.");
+      setStatusMessage("Mentor response in progress.");
 
       try {
-        for (const event of nextScript) {
-          await waitIfPaused(controller.signal);
+        for (const event of script) {
+          if (controller.signal.aborted) {
+            throw createAbortError();
+          }
 
           if (event.type === "speak") {
-            setCurrentLine(event.text);
-            await speakText({
-              text: event.text,
-              language,
-              rate: speed,
-              signal: controller.signal,
-            });
+            const animatePromise = animateLine(event.text, controller.signal);
+            const speechPromise = event.audioBase64
+              ? playBase64Audio(event.audioBase64, event.audioMimeType ?? "audio/mpeg", controller.signal)
+              : speakText({
+                  text: event.text,
+                  language,
+                  rate: 1,
+                  signal: controller.signal,
+                });
+
+            await Promise.all([animatePromise, speechPromise]);
           } else {
             await runCanvasEvent(event);
           }
         }
 
-        setPlaybackState("completed");
-        setStatusMessage("Session complete. You can replay it or inspect findings manually.");
+        setStatusMessage("Response complete. Ask the next question by voice or text.");
       } catch (playbackError) {
-        if (
-          playbackError instanceof DOMException &&
-          playbackError.name === "AbortError"
-        ) {
+        if (playbackError instanceof DOMException && playbackError.name === "AbortError") {
           return;
         }
 
         const message =
-          playbackError instanceof Error
-            ? playbackError.message
-            : "Playback failed unexpectedly.";
+          playbackError instanceof Error ? playbackError.message : "Playback failed unexpectedly.";
         setError(message);
         setStatusMessage("Playback failed.");
-        setPlaybackState("ready");
       }
     },
-    [language, runCanvasEvent, speed, stopPlayback, waitIfPaused],
+    [animateLine, language, playBase64Audio, runCanvasEvent, stopPlayback],
   );
 
-  const handleStart = useCallback(async () => {
+  const requestConversationTurn = useCallback(
+    async (input: { text?: string; audio?: Blob }) => {
+      if (!spatialContext) {
+        setError("Upload a radiograph or load demo mode before starting a conversation.");
+        return;
+      }
+
+      setIsProcessingMessage(true);
+      setError(null);
+      setStatusMessage("Transcribing and generating mentor response...");
+
+      try {
+        const formData = new FormData();
+        formData.set("spatialContext", JSON.stringify(spatialContext));
+        formData.set("language", language);
+        formData.set(
+          "history",
+          JSON.stringify(
+            conversation.map((turn) => ({
+              role: turn.role,
+              text: turn.text,
+            })),
+          ),
+        );
+        if (input.text?.trim()) {
+          formData.set("text", input.text.trim());
+        }
+        if (input.audio) {
+          const mimeType = input.audio.type || "audio/webm";
+          const extension = extensionFromMimeType(mimeType);
+          formData.set("audio", new File([input.audio], `recording.${extension}`, { type: mimeType }));
+        }
+
+        const response = await fetch("/api/conversation", {
+          method: "POST",
+          body: formData,
+        });
+        const payload = (await response.json()) as {
+          error?: string;
+          userTranscript?: string;
+          script?: ScriptEvent[];
+        };
+
+        if (!response.ok || !payload.script || !payload.userTranscript) {
+          throw new Error(payload.error ?? "Conversation request failed.");
+        }
+
+        const assistantText = payload.script
+          .filter((event): event is Extract<ScriptEvent, { type: "speak" }> => event.type === "speak")
+          .map((event) => event.text)
+          .join(" ")
+          .trim();
+        const nextTurnAt = () => {
+          turnClockRef.current = Math.max(turnClockRef.current + 1, Date.now());
+          return turnClockRef.current;
+        };
+
+        const userTranscript = payload.userTranscript;
+        if (!userTranscript) {
+          throw new Error("Missing transcript in conversation response.");
+        }
+
+        setConversation((current) =>
+          appendTurns(current, [
+            { role: "user", text: userTranscript, at: nextTurnAt() },
+            ...(assistantText
+              ? [{ role: "assistant" as const, text: assistantText, at: nextTurnAt() }]
+              : []),
+          ]),
+        );
+
+        await playScript(payload.script);
+      } finally {
+        setMessageInput("");
+        setIsProcessingMessage(false);
+      }
+    },
+    [conversation, language, playScript, spatialContext],
+  );
+
+  const handleSendText = useCallback(async () => {
+    if (!messageInput.trim() || busy) {
+      return;
+    }
+    await requestConversationTurn({ text: messageInput });
+  }, [busy, messageInput, requestConversationTurn]);
+
+  const handleToggleRecording = useCallback(async () => {
+    if (busy) {
+      return;
+    }
+
+    if (isRecording) {
+      mediaRecorderRef.current?.stop();
+      setIsRecording(false);
+      return;
+    }
+
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+      setError("Audio recording is not supported in this browser.");
+      return;
+    }
+
     try {
-      const nextScript = await ensureScript();
-      await runPlayback(nextScript);
-    } catch (startError) {
-      const message =
-        startError instanceof Error ? startError.message : "Unable to start the mentor session.";
-      setError(message);
-      setStatusMessage("Unable to start the mentor session.");
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      mediaChunksRef.current = [];
+
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          mediaChunksRef.current.push(event.data);
+        }
+      };
+
+      recorder.onstop = () => {
+        const blob = new Blob(mediaChunksRef.current, { type: recorder.mimeType || "audio/webm" });
+        stream.getTracks().forEach((track) => track.stop());
+        mediaRecorderRef.current = null;
+        if (blob.size > 0) {
+          void requestConversationTurn({ audio: blob });
+        }
+      };
+
+      recorder.start();
+      mediaRecorderRef.current = recorder;
+      setError(null);
+      setIsRecording(true);
+      setStatusMessage("Recording started. Click again to stop and send for transcription.");
+    } catch {
+      setError("Unable to access microphone.");
     }
-  }, [ensureScript, runPlayback]);
-
-  const handlePause = useCallback(() => {
-    if (playbackState !== "playing") {
-      return;
-    }
-
-    pauseSpeech();
-    setPlaybackState("paused");
-    setStatusMessage("Session paused.");
-  }, [playbackState]);
-
-  const handleResume = useCallback(() => {
-    if (playbackState !== "paused") {
-      return;
-    }
-
-    resumeSpeech();
-    setPlaybackState("playing");
-    setStatusMessage("Session resumed.");
-    releasePauseWaiters();
-  }, [playbackState, releasePauseWaiters]);
-
-  const handleStop = useCallback(() => {
-    void stopPlayback(sessionSource === "none" ? "idle" : "ready");
-    setStatusMessage("Session stopped.");
-  }, [sessionSource, stopPlayback]);
+  }, [busy, isRecording, requestConversationTurn]);
 
   const handleSelectTooth = useCallback(
     async (toothId: string) => {
       setSelectedAreaId(null);
       setSelectedToothId(toothId);
-      if (!spatialContext || playbackState === "playing" || playbackState === "paused") {
+      if (!spatialContext) {
         return;
       }
 
@@ -377,27 +448,24 @@ export default function DashboardPage() {
         tooth.findings[0]?.label,
       );
     },
-    [playbackState, spatialContext],
+    [spatialContext],
   );
 
-  const handleSelectArea = useCallback(
-    async (area: SpatialFinding) => {
-      setSelectedToothId(null);
-      setSelectedAreaId(area.id);
-      if (!canvasRef.current || playbackState === "playing" || playbackState === "paused") {
-        return;
-      }
+  const handleSelectArea = useCallback(async (area: SpatialFinding) => {
+    setSelectedToothId(null);
+    setSelectedAreaId(area.id);
+    if (!canvasRef.current) {
+      return;
+    }
 
-      await canvasRef.current.highlightPolygon(
-        area.id,
-        area.polygon,
-        toneToHighlightColor(area.tone),
-        0.28,
-        area.label,
-      );
-    },
-    [playbackState],
-  );
+    await canvasRef.current.highlightPolygon(
+      area.id,
+      area.polygon,
+      toneToHighlightColor(area.tone),
+      0.28,
+      area.label,
+    );
+  }, []);
 
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-[1800px] flex-col gap-6 px-4 py-6 sm:px-6 lg:px-8">
@@ -452,23 +520,21 @@ export default function DashboardPage() {
         <MentorPanel
           language={language}
           onLanguageChange={handleLanguageChange}
-          speed={speed}
-          onSpeedChange={setSpeed}
-          onStart={handleStart}
-          onPause={handlePause}
-          onResume={handleResume}
-          onStop={handleStop}
-          playbackState={playbackState}
           busy={busy}
-          voicesReady={voicesReady}
+          isRecording={isRecording}
+          message={messageInput}
+          onMessageChange={setMessageInput}
+          onSendText={handleSendText}
+          onToggleRecording={handleToggleRecording}
           currentLine={currentLine}
           sessionLabel={
             sessionSource === "demo"
-              ? "Offline sample session using bundled panoramic data."
+              ? "Offline sample canvas with live voice/text mentor conversation."
               : sessionSource === "live"
-                ? "Audio chatbot script is generated from the live spatial context."
-                : "Select a radiograph to prepare the audio chatbot session."
+                ? "Recorded audio is transcribed, sent to the LLM, and played back with canvas animation."
+                : "Select a radiograph first, then talk to the mentor."
           }
+          conversation={conversation}
         />
       </section>
     </main>

@@ -1,7 +1,7 @@
 # DentalMentor AI
 
 DentalMentor AI is a Next.js web app for interactive dental radiograph teaching.  
-It combines image analysis results with an audio mentor session, synchronized canvas zoom/highlight actions, and live transcription.
+It combines image analysis results with an active voice/text mentor conversation, synchronized canvas zoom/highlight actions, and animated live transcription.
 
 ## Features
 
@@ -10,11 +10,14 @@ It combines image analysis results with an audio mentor session, synchronized ca
   - Tooth-level and region highlights
   - Canvas zoom and annotation playback
   - Findings navigation panel
-- Audio mentor session with:
-  - Language support: English, French, Arabic
-  - Adjustable playback speed
-  - Live transcription display
+- Active mentor conversation with:
+  - Voice recording (browser microphone) or typed message
+  - OpenAI Whisper transcription for recorded audio
+  - Anthropic Sonnet scripted narrative + canvas actions
+  - gpt-4o-mini-tts audio playback for mentor narration
+  - Animated live transcription display
 - Local browser caching of repeated image analysis uploads
+- Local browser transcript-only conversation history (compact storage)
 - Offline demo mode (no external keys required)
 
 ## Tech Stack
@@ -62,7 +65,14 @@ It combines image analysis results with an audio mentor session, synchronized ca
 ### Optional for AI mentor script generation
 
 - `ANTHROPIC_API_KEY`  
-  If omitted, the app automatically uses a built-in rule-based fallback mentor script.
+  Used for conversation-driven mentor script generation and canvas tool sequencing.
+
+### Required for voice conversation (Whisper + TTS)
+
+- `OPENAI_API_KEY`  
+  Required for:
+  - Whisper transcription (`whisper-1`)
+  - Mentor speech synthesis (`gpt-4o-mini-tts`)
 
 ## Scripts
 
@@ -76,9 +86,10 @@ It combines image analysis results with an audio mentor session, synchronized ca
 - `POST /api/analyze` - Submit a radiograph file for analysis
 - `GET /api/analyze?slug=...&language=...` - Poll analysis status/result
 - `POST /api/mentor` - Generate mentor script from spatial context
+- `POST /api/conversation` - Accept typed/recorded user input, transcribe audio, generate scripted response, and return narration audio
 
 ## Notes
 
-- Demo mode uses bundled sample radiograph data and runs without ThakaaMed or Anthropic keys.
-- Web speech playback relies on the browser SpeechSynthesis API.
+- Demo mode uses bundled sample radiograph data and runs without ThakaaMed keys.
+- Active conversation uses sequential script playback to animate text and synchronize canvas actions.
 - This project is a demonstration prototype and does not replace professional dental consultation.

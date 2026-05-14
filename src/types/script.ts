@@ -18,6 +18,8 @@ export const LANGUAGE_META: Record<
 export interface SpeakEvent {
   type: "speak";
   text: string;
+  audioBase64?: string;
+  audioMimeType?: string;
 }
 
 export interface CanvasEvent {
