@@ -67,6 +67,13 @@ interface RadiographCanvasProps {
 }
 
 const LABEL_VERTICAL_OFFSET = 18;
+const MANUAL_ZOOM_STEP = 1.18;
+const MIN_ZOOM_MULTIPLIER = 0.7;
+const MAX_ZOOM_MULTIPLIER = 6;
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
 
 function getPolygonBounds(polygon: ThakaaMedCoordinatePair[]): ThakaaMedBoundingBox {
   const xs = polygon.map(([x]) => x);
@@ -134,6 +141,14 @@ export const RadiographCanvas = forwardRef<
     () => getBaseTransform(stageWidth, imageSize.width),
     [imageSize.width, stageWidth],
   );
+  const minScale = useMemo(
+    () => baseTransform.scale * MIN_ZOOM_MULTIPLIER,
+    [baseTransform.scale],
+  );
+  const maxScale = useMemo(
+    () => baseTransform.scale * MAX_ZOOM_MULTIPLIER,
+    [baseTransform.scale],
+  );
 
   const applyTransformImmediately = useCallback((transform: { x: number; y: number; scale: number }) => {
     const node = groupRef.current;
@@ -188,6 +203,34 @@ export const RadiographCanvas = forwardRef<
       });
     },
     [applyTransformImmediately],
+  );
+
+  const getScaledTransformAtPoint = useCallback(
+    (stagePoint: { x: number; y: number }, targetScale: number) => {
+      const current = transformRef.current;
+      const imagePointX = (stagePoint.x - current.x) / current.scale;
+      const imagePointY = (stagePoint.y - current.y) / current.scale;
+
+      return {
+        scale: targetScale,
+        x: stagePoint.x - imagePointX * targetScale,
+        y: stagePoint.y - imagePointY * targetScale,
+      };
+    },
+    [],
+  );
+
+  const zoomByStep = useCallback(
+    async (direction: "in" | "out") => {
+      const factor = direction === "in" ? MANUAL_ZOOM_STEP : 1 / MANUAL_ZOOM_STEP;
+      const nextScale = clamp(transformRef.current.scale * factor, minScale, maxScale);
+      const nextTransform = getScaledTransformAtPoint(
+        { x: stageWidth / 2, y: stageHeight / 2 },
+        nextScale,
+      );
+      await animateTo(nextTransform, 280);
+    },
+    [animateTo, getScaledTransformAtPoint, maxScale, minScale, stageHeight, stageWidth],
   );
 
   useImperativeHandle(
@@ -285,14 +328,58 @@ export const RadiographCanvas = forwardRef<
           </p>
           <h2 className="mt-2 text-xl font-semibold text-white">Interactive clinical canvas</h2>
         </div>
-        <div className="rounded-full border border-white/10 px-3 py-1 text-xs font-medium text-slate-300">
-          {spatialContext?.imageType ?? "Waiting for image"}
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              void zoomByStep("out");
+            }}
+            disabled={!imageElement}
+            className="rounded-full border border-white/10 px-3 py-1 text-xs font-semibold text-slate-200 transition hover:border-cyan-300 disabled:cursor-not-allowed disabled:border-slate-700 disabled:text-slate-500"
+            aria-label="Zoom out"
+          >
+            −
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              void zoomByStep("in");
+            }}
+            disabled={!imageElement}
+            className="rounded-full border border-white/10 px-3 py-1 text-xs font-semibold text-slate-200 transition hover:border-cyan-300 disabled:cursor-not-allowed disabled:border-slate-700 disabled:text-slate-500"
+            aria-label="Zoom in"
+          >
+            +
+          </button>
+          <div className="rounded-full border border-white/10 px-3 py-1 text-xs font-medium text-slate-300">
+            {spatialContext?.imageType ?? "Waiting for image"}
+          </div>
         </div>
       </div>
 
       <div ref={containerRef} className="overflow-hidden rounded-[28px] border border-white/10 bg-slate-950/90">
         {imageElement ? (
-          <Stage width={stageWidth} height={stageHeight}>
+          <Stage
+            width={stageWidth}
+            height={stageHeight}
+            onWheel={(event) => {
+              event.evt.preventDefault();
+              const stage = event.target.getStage();
+              if (!stage) {
+                return;
+              }
+
+              const pointer = stage.getPointerPosition();
+              if (!pointer) {
+                return;
+              }
+
+              const factor = event.evt.deltaY > 0 ? 1 / MANUAL_ZOOM_STEP : MANUAL_ZOOM_STEP;
+              const nextScale = clamp(transformRef.current.scale * factor, minScale, maxScale);
+              const nextTransform = getScaledTransformAtPoint(pointer, nextScale);
+              applyTransformImmediately(nextTransform);
+            }}
+          >
             <Layer>
               <Group ref={groupRef}>
                 <KonvaImage image={imageElement} width={imageSize.width} height={imageSize.height} />
