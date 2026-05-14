@@ -95,7 +95,12 @@ export function CanvasSelectorPanel({
                       }`}
                     />
                   </div>
-                  <p className="mt-1 text-xs text-slate-400">{area.probability.toFixed(1)}% confidence</p>
+                  <p className="mt-1 text-xs text-slate-400">
+                    {Number.isInteger(area.probability)
+                      ? area.probability.toFixed(0)
+                      : area.probability.toFixed(1)}
+                    % confidence
+                  </p>
                 </button>
               ))
             )}
