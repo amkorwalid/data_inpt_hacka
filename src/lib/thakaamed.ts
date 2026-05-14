@@ -2,6 +2,8 @@ import { hashFile, readCachedAnalysis, writeCachedAnalysis } from "@/lib/cache";
 import type { MentorLanguage } from "@/types/script";
 import type { ThakaaMedAnalysisResponse } from "@/types/thakaamed";
 
+const ANALYSIS_SLUG_PATTERN = /^[a-zA-Z0-9-]{8,128}$/;
+
 function getRequiredEnv(name: string) {
   const value = process.env[name];
   if (!value) {
@@ -45,6 +47,12 @@ function extractSlug(payload: unknown) {
   );
 }
 
+function assertValidSlug(slug: string) {
+  if (!ANALYSIS_SLUG_PATTERN.test(slug)) {
+    throw new Error("Invalid analysis slug.");
+  }
+}
+
 export async function submitThakaaMedAnalysis(
   image: File,
   language: MentorLanguage,
@@ -81,6 +89,7 @@ export async function pollThakaaMedAnalysis(
   slug: string,
   language: MentorLanguage,
 ): Promise<ThakaaMedAnalysisResponse> {
+  assertValidSlug(slug);
   const apiKey = getRequiredEnv("THAKAAMED_API_KEY");
   const facilityCode = getRequiredEnv("THAKAAMED_FACILITY_CODE");
   const base = normalizeBaseUrl(language);
@@ -117,7 +126,7 @@ export async function pollThakaaMedAnalysis(
 }
 
 function wait(delayMs: number) {
-  return new Promise((resolve) => window.setTimeout(resolve, delayMs));
+  return new Promise((resolve) => globalThis.setTimeout(resolve, delayMs));
 }
 
 export async function analyzeWithCache(file: File, language: MentorLanguage) {
