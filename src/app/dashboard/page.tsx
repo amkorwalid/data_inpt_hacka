@@ -11,6 +11,7 @@ import {
 import { UploadZone } from "@/components/UploadZone";
 import { getToothPrimaryColor, toneToHighlightColor } from "@/lib/canvasOps";
 import {
+  MAX_CONVERSATION_TURNS,
   readConversationTurns,
   type ConversationTurn,
   writeConversationTurns,
@@ -27,8 +28,23 @@ function createAbortError() {
 }
 
 function appendTurns(current: ConversationTurn[], next: ConversationTurn[]) {
-  return [...current, ...next].slice(-40);
+  return [...current, ...next].slice(-MAX_CONVERSATION_TURNS);
 }
+
+function extensionFromMimeType(mimeType: string) {
+  if (mimeType.includes("ogg")) {
+    return "ogg";
+  }
+  if (mimeType.includes("mp4")) {
+    return "mp4";
+  }
+  if (mimeType.includes("mpeg")) {
+    return "mp3";
+  }
+  return "webm";
+}
+
+const ANIMATION_CHAR_DELAY_MS = 12;
 
 export default function DashboardPage() {
   const canvasRef = useRef<RadiographCanvasHandle | null>(null);
@@ -36,6 +52,7 @@ export default function DashboardPage() {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaChunksRef = useRef<Blob[]>([]);
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
+  const turnClockRef = useRef(0);
 
   const [analysis, setAnalysis] = useState<ThakaaMedAnalysisResponse | null>(null);
   const [spatialContext, setSpatialContext] = useState<SpatialContext | null>(null);
@@ -57,6 +74,10 @@ export default function DashboardPage() {
 
   useEffect(() => {
     writeConversationTurns(conversation);
+    const latestTurnAt = conversation[conversation.length - 1]?.at;
+    if (latestTurnAt) {
+      turnClockRef.current = Math.max(turnClockRef.current, latestTurnAt);
+    }
   }, [conversation]);
 
   const busy = isAnalyzing || isProcessingMessage;
@@ -190,7 +211,7 @@ export default function DashboardPage() {
         throw createAbortError();
       }
       setCurrentLine(text.slice(0, index));
-      await new Promise((resolve) => window.setTimeout(resolve, 12));
+      await new Promise((resolve) => window.setTimeout(resolve, ANIMATION_CHAR_DELAY_MS));
     }
   }, []);
 
@@ -301,7 +322,9 @@ export default function DashboardPage() {
           formData.set("text", input.text.trim());
         }
         if (input.audio) {
-          formData.set("audio", new File([input.audio], "recording.webm", { type: input.audio.type || "audio/webm" }));
+          const mimeType = input.audio.type || "audio/webm";
+          const extension = extensionFromMimeType(mimeType);
+          formData.set("audio", new File([input.audio], `recording.${extension}`, { type: mimeType }));
         }
 
         const response = await fetch("/api/conversation", {
@@ -323,12 +346,21 @@ export default function DashboardPage() {
           .map((event) => event.text)
           .join(" ")
           .trim();
+        const nextTurnAt = () => {
+          turnClockRef.current = Math.max(turnClockRef.current + 1, Date.now());
+          return turnClockRef.current;
+        };
+
+        const userTranscript = payload.userTranscript;
+        if (!userTranscript) {
+          throw new Error("Missing transcript in conversation response.");
+        }
 
         setConversation((current) =>
           appendTurns(current, [
-            { role: "user", text: payload.userTranscript!, at: Date.now() },
+            { role: "user", text: userTranscript, at: nextTurnAt() },
             ...(assistantText
-              ? [{ role: "assistant" as const, text: assistantText, at: Date.now() + 1 }]
+              ? [{ role: "assistant" as const, text: assistantText, at: nextTurnAt() }]
               : []),
           ]),
         );

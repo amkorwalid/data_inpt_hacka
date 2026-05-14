@@ -5,6 +5,7 @@ import { LANGUAGE_META, type MentorLanguage } from "@/types/script";
 interface ConversationLine {
   role: "user" | "assistant";
   text: string;
+  at: number;
 }
 
 interface MentorPanelProps {
@@ -116,8 +117,8 @@ export function MentorPanel({
           {conversation.length === 0 ? (
             <p className="text-slate-400">No conversation yet.</p>
           ) : (
-            conversation.slice(-10).map((line, index) => (
-              <p key={`${line.role}-${index}`}>
+            conversation.slice(-10).map((line) => (
+              <p key={`${line.role}-${line.at}`}>
                 <span className="font-semibold text-cyan-200">
                   {line.role === "user" ? "You" : "Mentor"}:
                 </span>{" "}

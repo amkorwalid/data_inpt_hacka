@@ -23,6 +23,7 @@ const TOOL_NAMES: CanvasToolName[] = [
   "reset_view",
 ];
 const HIGHLIGHT_COLORS: HighlightColor[] = ["red", "yellow", "green", "blue"];
+const TTS_MAX_INPUT_LENGTH = 2000;
 
 function parseLanguage(raw: unknown): MentorLanguage {
   return raw === "fr" || raw === "ar" ? raw : "en";
@@ -130,7 +131,7 @@ async function synthesizeSpeech(text: string, apiKey: string) {
       model: "gpt-4o-mini-tts",
       voice: "alloy",
       format: "mp3",
-      input: text.slice(0, 2000),
+      input: text.slice(0, TTS_MAX_INPUT_LENGTH),
     }),
     cache: "no-store",
   });

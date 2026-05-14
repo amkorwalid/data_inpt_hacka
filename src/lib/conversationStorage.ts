@@ -5,7 +5,8 @@ export interface ConversationTurn {
 }
 
 const STORAGE_KEY = "dentalmentor:conversation:v1";
-const MAX_TURNS = 40;
+// Keeps only compact transcript history to limit localStorage footprint.
+export const MAX_CONVERSATION_TURNS = 40;
 
 function isConversationTurn(input: unknown): input is ConversationTurn {
   if (!input || typeof input !== "object") {
@@ -46,7 +47,7 @@ export function writeConversationTurns(turns: ConversationTurn[]) {
     return;
   }
 
-  const compactTurns = turns.slice(-MAX_TURNS).map((turn) => ({
+  const compactTurns = turns.slice(-MAX_CONVERSATION_TURNS).map((turn) => ({
     role: turn.role,
     text: turn.text.trim(),
     at: turn.at,
