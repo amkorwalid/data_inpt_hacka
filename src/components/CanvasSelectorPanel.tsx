@@ -11,6 +11,10 @@ interface CanvasSelectorPanelProps {
   onSelectArea: (area: SpatialFinding) => void;
 }
 
+function formatConfidence(probability: number): string {
+  return Number.isInteger(probability) ? probability.toFixed(0) : probability.toFixed(1);
+}
+
 export function CanvasSelectorPanel({
   spatialContext,
   selectedToothId,
@@ -96,10 +100,7 @@ export function CanvasSelectorPanel({
                     />
                   </div>
                   <p className="mt-1 text-xs text-slate-400">
-                    {Number.isInteger(area.probability)
-                      ? area.probability.toFixed(0)
-                      : area.probability.toFixed(1)}
-                    % confidence
+                    {formatConfidence(area.probability)}% confidence
                   </p>
                 </button>
               ))
