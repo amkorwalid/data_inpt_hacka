@@ -23,17 +23,17 @@ import {
 
 import {
   getBaseTransform,
-  getLabelAnchor,
   getToothPrimaryColor,
   getZoomTransform,
   HIGHLIGHT_COLORS,
   polygonToKonvaPoints,
 } from "@/lib/canvasOps";
 import type { HighlightColor } from "@/types/script";
-import type { SpatialContext } from "@/types/thakaamed";
+import type { SpatialContext, ThakaaMedBoundingBox, ThakaaMedCoordinatePair } from "@/types/thakaamed";
 
 interface HighlightOverlay {
-  toothId: string;
+  id: string;
+  polygon: ThakaaMedCoordinatePair[];
   color: HighlightColor;
   opacity: number;
   label?: string;
@@ -47,6 +47,13 @@ export interface RadiographCanvasHandle {
     opacity?: number,
     label?: string,
   ) => Promise<void>;
+  highlightPolygon: (
+    id: string,
+    polygon: ThakaaMedCoordinatePair[],
+    color?: HighlightColor,
+    opacity?: number,
+    label?: string,
+  ) => Promise<void>;
   annotate: (toothId: string, label: string) => Promise<void>;
   resetView: () => Promise<void>;
 }
@@ -55,14 +62,26 @@ interface RadiographCanvasProps {
   imageSrc: string | null;
   spatialContext: SpatialContext | null;
   selectedToothId: string | null;
+  selectedAreaPolygon?: ThakaaMedCoordinatePair[] | null;
   onToothSelect: (toothId: string) => void;
+}
+
+function getPolygonBounds(polygon: ThakaaMedCoordinatePair[]): ThakaaMedBoundingBox {
+  const xs = polygon.map(([x]) => x);
+  const ys = polygon.map(([, y]) => y);
+  return {
+    xmin: Math.min(...xs),
+    ymin: Math.min(...ys),
+    xmax: Math.max(...xs),
+    ymax: Math.max(...ys),
+  };
 }
 
 export const RadiographCanvas = forwardRef<
   RadiographCanvasHandle,
   RadiographCanvasProps
 >(function RadiographCanvas(
-  { imageSrc, spatialContext, selectedToothId, onToothSelect },
+  { imageSrc, spatialContext, selectedToothId, selectedAreaPolygon = null, onToothSelect },
   ref,
 ) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -196,11 +215,13 @@ export const RadiographCanvas = forwardRef<
         setActiveToothId(toothId);
         setOverlays((current) => {
           const nextColor = color ?? getToothPrimaryColor(tooth);
-          const filtered = current.filter((item) => item.toothId !== toothId);
+          const nextId = `tooth:${toothId}`;
+          const filtered = current.filter((item) => item.id !== nextId);
           return [
             ...filtered,
             {
-              toothId,
+              id: nextId,
+              polygon: tooth.polygon,
               color: nextColor,
               opacity,
               label,
@@ -210,10 +231,32 @@ export const RadiographCanvas = forwardRef<
 
         await new Promise((resolve) => window.setTimeout(resolve, 180));
       },
+      async highlightPolygon(id, polygon, color = "yellow", opacity = 0.3, label) {
+        if (!polygon.length) {
+          return;
+        }
+
+        const bbox = getPolygonBounds(polygon);
+        await animateTo(
+          getZoomTransform({
+            bbox,
+            stageWidth,
+            stageHeight,
+            maxZoom: 2.2,
+          }),
+          550,
+        );
+
+        setOverlays((current) => {
+          const nextId = `area:${id}`;
+          const filtered = current.filter((item) => item.id !== nextId);
+          return [...filtered, { id: nextId, polygon, color, opacity, label }];
+        });
+      },
       async annotate(toothId, label) {
         setOverlays((current) =>
           current.map((item) =>
-            item.toothId === toothId ? { ...item, label } : item,
+            item.id === `tooth:${toothId}` ? { ...item, label } : item,
           ),
         );
       },
@@ -238,7 +281,7 @@ export const RadiographCanvas = forwardRef<
           <p className="text-sm font-semibold uppercase tracking-[0.32em] text-cyan-200">
             Radiograph canvas
           </p>
-          <h2 className="mt-2 text-xl font-semibold text-white">Zoom + highlight in sync with the mentor</h2>
+          <h2 className="mt-2 text-xl font-semibold text-white">Interactive clinical canvas</h2>
         </div>
         <div className="rounded-full border border-white/10 px-3 py-1 text-xs font-medium text-slate-300">
           {spatialContext?.imageType ?? "Waiting for image"}
@@ -263,6 +306,17 @@ export const RadiographCanvas = forwardRef<
                   />
                 )}
 
+                {selectedAreaPolygon && (
+                  <Line
+                    points={polygonToKonvaPoints(selectedAreaPolygon)}
+                    closed
+                    stroke="#67e8f9"
+                    strokeWidth={5}
+                    opacity={0.7}
+                    listening={false}
+                  />
+                )}
+
                 {Object.values(spatialContext?.teeth ?? {}).map((tooth) => (
                   <Line
                     key={tooth.toothId}
@@ -278,16 +332,11 @@ export const RadiographCanvas = forwardRef<
                 ))}
 
                 {overlays.map((overlay) => {
-                  const tooth = spatialContext?.teeth[overlay.toothId];
-                  if (!tooth) {
-                    return null;
-                  }
-
-                  const anchor = getLabelAnchor(tooth.findings[0], tooth.bbox);
+                  const [x, y] = overlay.polygon[0] ?? [0, 0];
                   return (
-                    <Group key={overlay.toothId}>
+                    <Group key={overlay.id}>
                       <Line
-                        points={polygonToKonvaPoints(tooth.polygon)}
+                        points={polygonToKonvaPoints(overlay.polygon)}
                         closed
                         fill={HIGHLIGHT_COLORS[overlay.color]}
                         opacity={overlay.opacity}
@@ -296,7 +345,7 @@ export const RadiographCanvas = forwardRef<
                         listening={false}
                       />
                       {overlay.label && (
-                        <Label x={anchor.x} y={anchor.y} listening={false}>
+                        <Label x={x} y={y - 18} listening={false}>
                           <Tag fill="rgba(15, 23, 42, 0.92)" cornerRadius={10} />
                           <Text
                             text={overlay.label}
