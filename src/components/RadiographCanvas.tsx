@@ -66,6 +66,8 @@ interface RadiographCanvasProps {
   onToothSelect: (toothId: string) => void;
 }
 
+const LABEL_VERTICAL_OFFSET = 18;
+
 function getPolygonBounds(polygon: ThakaaMedCoordinatePair[]): ThakaaMedBoundingBox {
   const xs = polygon.map(([x]) => x);
   const ys = polygon.map(([, y]) => y);
@@ -345,7 +347,7 @@ export const RadiographCanvas = forwardRef<
                         listening={false}
                       />
                       {overlay.label && (
-                        <Label x={x} y={y - 18} listening={false}>
+                        <Label x={x} y={y - LABEL_VERTICAL_OFFSET} listening={false}>
                           <Tag fill="rgba(15, 23, 42, 0.92)" cornerRadius={10} />
                           <Text
                             text={overlay.label}

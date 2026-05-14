@@ -95,7 +95,7 @@ export function CanvasSelectorPanel({
                       }`}
                     />
                   </div>
-                  <p className="mt-1 text-xs text-slate-400">{Math.round(area.probability)}% confidence</p>
+                  <p className="mt-1 text-xs text-slate-400">{area.probability.toFixed(1)}% confidence</p>
                 </button>
               ))
             )}
